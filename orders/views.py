@@ -1,13 +1,24 @@
 import uuid
 from datetime import timedelta
 from django.utils import timezone
+from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from .models import Order, OrderHistory
-from .serializers import OrderSerializer
+from .serializers import (
+    CreateOrderRequestSerializer,
+    OrderSerializer,
+    PaymentStatusSerializer,
+    QuoteRequestSerializer,
+    QuoteSerializer,
+)
 from .wallet import generate_wallet
 
+@extend_schema(
+    request=QuoteRequestSerializer,
+    responses={200: QuoteSerializer},
+)
 @api_view(['POST'])
 def quote(request):
     currency = request.data.get('currency')
@@ -28,6 +39,10 @@ def quote(request):
         'source': 'backend'
     })
 
+@extend_schema(
+    request=CreateOrderRequestSerializer,
+    responses={201: OrderSerializer},
+)
 @api_view(['POST'])
 def create_order(request):
     quote_data = request.data.get('quote', {})
@@ -60,6 +75,7 @@ def create_order(request):
     serializer = OrderSerializer(order)
     return Response(serializer.data, status=status.HTTP_201_CREATED)
 
+@extend_schema(responses={200: OrderSerializer})
 @api_view(['GET'])
 def get_order(request, orderId):
     try:
@@ -70,6 +86,7 @@ def get_order(request, orderId):
     serializer = OrderSerializer(order)
     return Response(serializer.data)
 
+@extend_schema(request=None, responses={200: OrderSerializer})
 @api_view(['POST'])
 def cancel_order(request, orderId):
     try:
@@ -93,6 +110,7 @@ def cancel_order(request, orderId):
     serializer = OrderSerializer(order)
     return Response(serializer.data)
 
+@extend_schema(responses={200: PaymentStatusSerializer})
 @api_view(['GET'])
 def check_payment(request, orderId):
     try:
