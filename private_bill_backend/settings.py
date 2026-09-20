@@ -95,8 +95,10 @@ DATABASES = {
 # On Vercel the filesystem is ephemeral, so a SQLite file does not persist
 # between function invocations. Set DATABASE_URL (e.g. Vercel Postgres or any
 # managed PostgreSQL instance) to use a persistent database in production.
-if os.environ.get('DATABASE_URL'):
-    parsed = urllib.parse.urlparse(os.environ['DATABASE_URL'])
+database_url = os.environ.get('DATABASE_URL') or os.environ.get('POSTGRES_URL')
+if database_url:
+    parsed = urllib.parse.urlparse(database_url)
+    database_options = urllib.parse.parse_qs(parsed.query)
     DATABASES['default'] = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': parsed.path.lstrip('/'),
@@ -104,6 +106,11 @@ if os.environ.get('DATABASE_URL'):
         'PASSWORD': parsed.password,
         'HOST': parsed.hostname,
         'PORT': parsed.port or 5432,
+        'OPTIONS': {
+            key: values[-1]
+            for key, values in database_options.items()
+            if key in ('sslmode', 'connect_timeout')
+        },
     }
 
 

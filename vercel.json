@@ -1,5 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "python manage.py migrate --noinput",
   "functions": {
     "private_bill_backend/wsgi.py": {
       "maxDuration": 60,

@@ -1,5 +1,7 @@
 import uuid
 from datetime import timedelta
+import requests
+from django.db import OperationalError, transaction
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
@@ -22,9 +24,26 @@ from .wallet import generate_wallet
 @api_view(['POST'])
 def quote(request):
     currency = request.data.get('currency')
-    fiatAmount = request.data.get('fiatAmount', 0)
-    
-    rate = 1000 if currency == 'NGN' else 10
+    try:
+        fiatAmount = float(request.data.get('fiatAmount', 0))
+    except (TypeError, ValueError):
+        return Response({'error': 'fiatAmount must be a number.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if currency not in ('NGN', 'GHS') or fiatAmount < 0:
+        return Response({'error': 'currency must be NGN or GHS and fiatAmount must not be negative.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        rates_response = requests.get(
+            'https://api.coinbase.com/v2/exchange-rates',
+            params={'currency': 'ZEC'},
+            headers={'Accept': 'application/json'},
+            timeout=10,
+        )
+        rates_response.raise_for_status()
+        rate = float(rates_response.json()['data']['rates'][currency])
+    except (requests.RequestException, KeyError, TypeError, ValueError):
+        return Response({'error': 'Live ZEC pricing is temporarily unavailable.'}, status=status.HTTP_502_BAD_GATEWAY)
+
     fee = 0 if fiatAmount == 0 else max(fiatAmount * 0.0125, 75 if currency == 'NGN' else 0.5)
     zecAmount = round((fiatAmount + fee) / rate, 8)
     expiresAt = (timezone.now() + timedelta(minutes=10)).isoformat()
@@ -51,26 +70,33 @@ def create_order(request):
     order_id = f"PB-{str(uuid.uuid4()).split('-')[0].upper()}-{str(timezone.now().timestamp()).split('.')[0][-4:]}"
     paymentAddress = generate_wallet(order_id)
     
-    order = Order.objects.create(
-        id=order_id,
-        currency=quote_data.get('currency'),
-        fiatAmount=quote_data.get('fiatAmount'),
-        zecAmount=quote_data.get('zecAmount'),
-        rate=quote_data.get('rate'),
-        fee=quote_data.get('fee'),
-        recipientCountry=recipient_data.get('country'),
-        recipientBank=recipient_data.get('bank'),
-        recipientAccountNumber=recipient_data.get('accountNumber'),
-        recipientAccountName=recipient_data.get('accountName'),
-        paymentAddress=paymentAddress,
-        status='AWAITING_ZEC'
-    )
-    
-    OrderHistory.objects.create(
-        order=order,
-        status='AWAITING_ZEC',
-        note='Order created; waiting for ZEC payment.'
-    )
+    try:
+        with transaction.atomic():
+            order = Order.objects.create(
+                id=order_id,
+                currency=quote_data.get('currency'),
+                fiatAmount=quote_data.get('fiatAmount'),
+                zecAmount=quote_data.get('zecAmount'),
+                rate=quote_data.get('rate'),
+                fee=quote_data.get('fee'),
+                recipientCountry=recipient_data.get('country'),
+                recipientBank=recipient_data.get('bank'),
+                recipientAccountNumber=recipient_data.get('accountNumber'),
+                recipientAccountName=recipient_data.get('accountName'),
+                paymentAddress=paymentAddress,
+                status='AWAITING_ZEC'
+            )
+
+            OrderHistory.objects.create(
+                order=order,
+                status='AWAITING_ZEC',
+                note='Order created; waiting for ZEC payment.'
+            )
+    except OperationalError:
+        return Response(
+            {'error': 'Order storage is unavailable. Configure the backend database before creating orders.'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     
     serializer = OrderSerializer(order)
     return Response(serializer.data, status=status.HTTP_201_CREATED)
