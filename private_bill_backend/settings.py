@@ -10,6 +10,8 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import os
+import urllib.parse
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -20,12 +22,18 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-97&#57qwb1=_$$+&v)i96+20j3qen4=@&7n@uxn-!n8411#^%%'
+# On Vercel, set DJANGO_SECRET_KEY in the project's environment variables.
+SECRET_KEY = os.environ.get(
+    'DJANGO_SECRET_KEY',
+    'django-insecure-97&#57qwb1=_$$+&v)i96+20j3qen4=@&7n@uxn-!n8411#^%%'
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# On Vercel, set DJANGO_DEBUG=false in the production environment.
+DEBUG = os.environ.get('DJANGO_DEBUG', 'True').lower() in ('1', 'true', 'yes')
 
-ALLOWED_HOSTS = []
+# On Vercel, set DJANGO_ALLOWED_HOSTS (comma-separated) to restrict hosts.
+ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '*').split(',')
 
 
 # Application definition
@@ -83,6 +91,20 @@ DATABASES = {
     }
 }
 
+# On Vercel the filesystem is ephemeral, so a SQLite file does not persist
+# between function invocations. Set DATABASE_URL (e.g. Vercel Postgres or any
+# managed PostgreSQL instance) to use a persistent database in production.
+if os.environ.get('DATABASE_URL'):
+    parsed = urllib.parse.urlparse(os.environ['DATABASE_URL'])
+    DATABASES['default'] = {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': parsed.path.lstrip('/'),
+        'USER': parsed.username,
+        'PASSWORD': parsed.password,
+        'HOST': parsed.hostname,
+        'PORT': parsed.port or 5432,
+    }
+
 
 # Password validation
 # https://docs.djangoproject.com/en/6.1/ref/settings/#auth-password-validators
@@ -119,6 +141,10 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = 'static/'
+
+# Vercel runs `collectstatic` during the build when STATIC_ROOT is set and
+# serves the collected files from its CDN at STATIC_URL.
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 
 # Email

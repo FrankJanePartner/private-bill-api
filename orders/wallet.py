@@ -1,7 +1,8 @@
+import os
 import requests
 import uuid
 
-API_KEY = 'zpay_NyWRsKTAbb6mSCQuftw93eHpxehF5RDJnBj01-9-fyA'
+API_KEY = os.environ.get('ZPAY_API_KEY', '')
 
 def generate_wallet(order_id: str) -> str:
     """
