@@ -12,7 +12,8 @@ class Order(models.Model):
     recipientBank = models.CharField(max_length=100)
     recipientAccountNumber = models.CharField(max_length=50)
     recipientAccountName = models.CharField(max_length=100)
-    paymentAddress = models.CharField(max_length=100)
+    # Mainnet Unified Addresses are much longer than transparent addresses.
+    paymentAddress = models.CharField(max_length=1024)
     status = models.CharField(max_length=50, default='AWAITING_ZEC')
     createdAt = models.DateTimeField(default=timezone.now)
     updatedAt = models.DateTimeField(default=timezone.now)
