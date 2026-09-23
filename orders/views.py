@@ -15,7 +15,7 @@ from .serializers import (
     QuoteRequestSerializer,
     QuoteSerializer,
 )
-from .wallet import generate_wallet
+from .wallet import WalletUnavailable, generate_wallet
 
 @extend_schema(
     request=QuoteRequestSerializer,
@@ -68,7 +68,14 @@ def create_order(request):
     recipient_data = request.data.get('recipient', {})
     
     order_id = f"PB-{str(uuid.uuid4()).split('-')[0].upper()}-{str(timezone.now().timestamp()).split('.')[0][-4:]}"
-    paymentAddress = generate_wallet(order_id)
+    try:
+        paymentAddress = generate_wallet(order_id, quote_data.get('zecAmount'))
+    except WalletUnavailable:
+        # Never create an order with a fake or transparent fallback address.
+        return Response(
+            {'error': 'Shielded Zcash address allocation is temporarily unavailable. Retry this order.'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     
     try:
         with transaction.atomic():
