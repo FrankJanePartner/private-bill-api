@@ -3,4 +3,5 @@ djangorestframework==3.18.1
 django-cors-headers==4.9.0
 drf-spectacular==0.30.0
 psycopg[binary]==3.2.10
+python-dotenv==1.1.1
 requests==2.34.2

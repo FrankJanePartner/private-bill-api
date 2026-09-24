@@ -20,8 +20,9 @@ class OrderSerializer(serializers.ModelSerializer):
     class Meta:
         model = Order
         fields = [
-            'id', 'currency', 'fiatAmount', 'zecAmount', 'rate', 'fee',
-            'recipient', 'paymentAddress', 'status', 'createdAt', 
+            'id', 'currency', 'fiatAmount', 'zecAmount', 'expectedAmount', 'receivedAmount', 'rate', 'fee',
+            'recipient', 'paymentAddress', 'transactionHash', 'blockNumber', 'confirmations',
+            'paymentDetectedAt', 'paymentConfirmedAt', 'completedAt', 'status', 'createdAt',
             'updatedAt', 'statusHistory', 'source'
         ]
 
@@ -53,5 +54,7 @@ class CreateOrderRequestSerializer(serializers.Serializer):
 
 class PaymentStatusSerializer(serializers.Serializer):
     status = serializers.CharField()
-    receivedAmount = serializers.FloatField()
-    confirmations = serializers.IntegerField()
+    expectedAmount = serializers.DecimalField(max_digits=18, decimal_places=8, min_value=0, required=False, allow_null=True)
+    receivedAmount = serializers.DecimalField(max_digits=18, decimal_places=8, min_value=0, required=False, allow_null=True)
+    confirmations = serializers.IntegerField(required=False, allow_null=True)
+    transactionHash = serializers.CharField(required=False, allow_null=True)
