@@ -1,9 +1,9 @@
 """ZPay address allocation client.
 
-Private Bill never creates Zcash addresses itself.  It asks ZPay to allocate an
+ZOERDPay never creates Zcash addresses itself.  It asks ZPay to allocate an
 address for each order, and ZPay's Rust wallet service derives the actual
 Unified Address from the merchant wallet.  This keeps all wallet keys out of
-Private Bill.
+ZOERDPay.
 """
 
 import os

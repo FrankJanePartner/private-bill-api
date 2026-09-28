@@ -175,8 +175,8 @@ REST_FRAMEWORK = {
 }
 
 SPECTACULAR_SETTINGS = {
-    'TITLE': 'Private Bill API',
-    'DESCRIPTION': 'Backend API for the Private Bill Zcash-to-fiat payment flow.',
+    'TITLE': 'ZOERDPay API',
+    'DESCRIPTION': 'Backend API for the ZOERDPay Zcash-to-fiat payment flow.',
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
 }
