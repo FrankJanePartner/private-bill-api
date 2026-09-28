@@ -1,11 +1,12 @@
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from django.contrib.admin.sites import AdminSite
 from django.contrib.auth import get_user_model
 from django.test import RequestFactory, SimpleTestCase, TestCase
 
-from .admin import OrderAdmin
+from .admin import OrderAdmin, OrderAdminForm
 from .models import Order
 from .wallet import WalletUnavailable, generate_wallet
 from .payment import evaluate_payment_status, process_payment_receipt
@@ -43,7 +44,7 @@ class ZPayAddressAllocationTests(SimpleTestCase):
 
 
 class PaymentLifecycleTests(TestCase):
-    def test_admin_can_complete_confirmed_payout_and_records_history(self):
+    def test_admin_status_dropdown_exposes_only_the_next_payout_state(self):
         order = Order.objects.create(
             id="PB-104",
             currency="NGN",
@@ -58,19 +59,44 @@ class PaymentLifecycleTests(TestCase):
             paymentAddress="u1testaddress",
             status="ZEC_CONFIRMED",
         )
+        form = OrderAdminForm(instance=order)
+        self.assertEqual(
+            list(form.fields['status'].choices),
+            [('ZEC_CONFIRMED', 'Zec Confirmed'), ('PAYOUT_PROCESSING', 'Payout Processing')],
+        )
+
+    def test_admin_status_change_updates_order_and_records_history(self):
+        order = Order.objects.create(
+            id="PB-106",
+            currency="NGN",
+            fiatAmount=5000,
+            zecAmount=1.0,
+            rate=5000,
+            fee=0,
+            recipientCountry="NG",
+            recipientBank="Test Bank",
+            recipientAccountNumber="123456",
+            recipientAccountName="Jane Doe",
+            paymentAddress="u1testaddress",
+            status="FIAT_SENT",
+        )
+        order.status = 'COMPLETED'
         order_admin = OrderAdmin(Order, AdminSite())
         request = RequestFactory().post('/admin/orders/order/')
+        request.user = SimpleNamespace(username='operator')
 
-        with patch.object(order_admin, 'message_user'):
-            order_admin.mark_payout_completed(request, Order.objects.filter(pk=order.pk))
+        order_admin.save_model(request, order, form=None, change=True)
 
         order.refresh_from_db()
         self.assertEqual(order.status, 'COMPLETED')
         self.assertIsNotNone(order.completedAt)
         self.assertEqual(order.statusHistory.latest('at').status, 'COMPLETED')
-        self.assertEqual(order.statusHistory.latest('at').note, 'Payout marked complete by admin.')
+        self.assertEqual(
+            order.statusHistory.latest('at').note,
+            'Status changed by admin from FIAT_SENT to COMPLETED.',
+        )
 
-    def test_admin_cannot_complete_underpaid_order(self):
+    def test_admin_cannot_advance_underpaid_order_from_dropdown(self):
         order = Order.objects.create(
             id="PB-105",
             currency="NGN",
@@ -85,16 +111,8 @@ class PaymentLifecycleTests(TestCase):
             paymentAddress="u1testaddress",
             status="UNDERPAID",
         )
-        order_admin = OrderAdmin(Order, AdminSite())
-        request = RequestFactory().post('/admin/orders/order/')
-
-        with patch.object(order_admin, 'message_user'):
-            order_admin.mark_payout_completed(request, Order.objects.filter(pk=order.pk))
-
-        order.refresh_from_db()
-        self.assertEqual(order.status, 'UNDERPAID')
-        self.assertIsNone(order.completedAt)
-        self.assertFalse(order.statusHistory.filter(status='COMPLETED').exists())
+        form = OrderAdminForm(instance=order)
+        self.assertEqual(list(form.fields['status'].choices), [('UNDERPAID', 'Underpaid')])
 
     def test_payment_tolerance_accepts_boundary_and_marks_amounts_outside_it(self):
         self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('0.995'))['status'], 'ZEC_CONFIRMED')

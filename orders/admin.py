@@ -1,4 +1,5 @@
-from django.contrib import admin, messages
+from django import forms
+from django.contrib import admin
 from django.db import transaction
 from django.utils import timezone
 
@@ -8,6 +9,34 @@ from .models import Order, OrderHistory
 admin.site.site_header = 'ZOERDPay administration'
 admin.site.site_title = 'ZOERDPay admin'
 admin.site.index_title = 'Payment operations'
+
+
+ADMIN_STATUS_TRANSITIONS = {
+    'ZEC_CONFIRMED': ('ZEC_CONFIRMED', 'PAYOUT_PROCESSING'),
+    'PAYOUT_PROCESSING': ('PAYOUT_PROCESSING', 'FIAT_SENT'),
+    'FIAT_SENT': ('FIAT_SENT', 'COMPLETED'),
+    'COMPLETED': ('COMPLETED',),
+}
+
+
+class OrderAdminForm(forms.ModelForm):
+    status = forms.ChoiceField(
+        choices=(),
+        help_text='Advance only after verifying the current payout step. Payment detection and exception statuses are system-controlled.',
+    )
+
+    class Meta:
+        model = Order
+        fields = '__all__'
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        current_status = self.instance.status or 'AWAITING_ZEC'
+        allowed_statuses = ADMIN_STATUS_TRANSITIONS.get(current_status, (current_status,))
+        self.fields['status'].choices = [
+            (status, status.replace('_', ' ').title())
+            for status in allowed_statuses
+        ]
 
 
 class OrderHistoryInline(admin.TabularInline):
@@ -22,6 +51,7 @@ class OrderHistoryInline(admin.TabularInline):
 
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
+    form = OrderAdminForm
     list_display = (
         'id', 'status', 'currency', 'fiatAmount', 'zecAmount', 'expectedAmount',
         'receivedAmount', 'paymentAddress', 'transactionHash', 'confirmations', 'createdAt', 'completedAt'
@@ -29,42 +59,29 @@ class OrderAdmin(admin.ModelAdmin):
     list_filter = ('status', 'currency', 'source')
     search_fields = ('id', 'paymentAddress', 'transactionHash', 'recipientAccountNumber', 'recipientAccountName')
     readonly_fields = (
-        'status', 'createdAt', 'updatedAt', 'paymentDetectedAt', 'paymentConfirmedAt', 'completedAt'
+        'createdAt', 'updatedAt', 'paymentDetectedAt', 'paymentConfirmedAt', 'completedAt'
     )
     inlines = (OrderHistoryInline,)
-    actions = ('mark_payout_completed',)
 
-    @admin.action(description='Mark selected eligible orders as payout complete')
-    def mark_payout_completed(self, request, queryset):
-        eligible_orders = queryset.filter(status__in=('ZEC_CONFIRMED', 'PAYOUT_PROCESSING', 'FIAT_SENT'))
-        completed_count = eligible_orders.count()
-        skipped_count = queryset.count() - completed_count
-        now = timezone.now()
+    def save_model(self, request, obj, form, change):
+        previous_status = None
+        if change:
+            previous_status = self.get_queryset(request).get(pk=obj.pk).status
+        status_changed = previous_status is not None and previous_status != obj.status
+        if status_changed:
+            now = timezone.now()
+            obj.updatedAt = now
+            if obj.status == 'COMPLETED':
+                obj.completedAt = now
 
         with transaction.atomic():
-            for order in eligible_orders:
-                order.status = 'COMPLETED'
-                order.completedAt = now
-                order.updatedAt = now
-                order.save(update_fields=('status', 'completedAt', 'updatedAt'))
+            super().save_model(request, obj, form, change)
+            if status_changed:
                 OrderHistory.objects.create(
-                    order=order,
-                    status='COMPLETED',
-                    note='Payout marked complete by admin.',
+                    order=obj,
+                    status=obj.status,
+                    note=f'Status changed by admin from {previous_status} to {obj.status}.',
                 )
-
-        if completed_count:
-            self.message_user(
-                request,
-                f'{completed_count} order(s) marked as payout complete.',
-                messages.SUCCESS,
-            )
-        if skipped_count:
-            self.message_user(
-                request,
-                f'{skipped_count} order(s) were skipped because payment is not confirmed or the order is terminal.',
-                messages.WARNING,
-            )
 
 
 @admin.register(OrderHistory)
