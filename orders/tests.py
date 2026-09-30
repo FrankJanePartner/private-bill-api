@@ -5,9 +5,10 @@ from unittest.mock import Mock, patch
 from django.contrib.admin.sites import AdminSite
 from django.contrib.auth import get_user_model
 from django.test import RequestFactory, SimpleTestCase, TestCase
+from rest_framework.test import APIClient
 
 from .admin import OrderAdmin, OrderAdminForm
-from .models import Order
+from .models import Order, OrderHistory
 from .wallet import WalletUnavailable, generate_wallet
 from .payment import evaluate_payment_status, process_payment_receipt
 
@@ -21,7 +22,7 @@ class ZPayAddressAllocationTests(SimpleTestCase):
     def test_requests_a_unified_address_from_zpay(self, post):
         address = "u1" + "a" * 180
         response = Mock()
-        response.json.return_value = {"address": address}
+        response.json.return_value = {"id": "2f1c5de2-9da6-4afb-9155-a464d18a437b", "address": address}
         post.return_value = response
 
         self.assertEqual(generate_wallet("PB-TEST-1234", "0.01234567"), address)
@@ -36,7 +37,7 @@ class ZPayAddressAllocationTests(SimpleTestCase):
     @patch("orders.wallet.requests.post")
     def test_rejects_transparent_address(self, post):
         response = Mock()
-        response.json.return_value = {"address": "t1not-a-shielded-address"}
+        response.json.return_value = {"id": "2f1c5de2-9da6-4afb-9155-a464d18a437b", "address": "t1not-a-shielded-address"}
         post.return_value = response
 
         with self.assertRaises(WalletUnavailable):
@@ -44,6 +45,28 @@ class ZPayAddressAllocationTests(SimpleTestCase):
 
 
 class PaymentLifecycleTests(TestCase):
+    @patch.dict('os.environ', {'ZPAY_API_BASE_URL': 'https://zpay.example', 'ZPAY_API_KEY': 'server-key'})
+    @patch('orders.wallet.requests.post')
+    def test_order_is_saved_when_zpay_payment_request_is_created(self, post):
+        response = Mock()
+        response.json.return_value = {
+            'id': '2f1c5de2-9da6-4afb-9155-a464d18a437b',
+            'address': 'u1testpaymentaddress',
+        }
+        post.return_value = response
+
+        result = APIClient().post('/api/private-bill/orders', {
+            'quote': {'currency': 'NGN', 'fiatAmount': 5000, 'zecAmount': 1, 'rate': 5000, 'fee': 0,
+                      'expiresAt': '2026-09-30T20:00:00Z', 'source': 'live'},
+            'recipient': {'country': 'NG', 'bank': 'Test Bank', 'accountNumber': '123456', 'accountName': 'Jane Doe'},
+        }, format='json')
+
+        self.assertEqual(result.status_code, 201)
+        order = Order.objects.get(id='2f1c5de2-9da6-4afb-9155-a464d18a437b')
+        self.assertEqual(order.status, 'AWAITING_ZEC')
+        self.assertEqual(order.source, 'zpay')
+        self.assertEqual(order.statusHistory.count(), 1)
+
     def test_admin_status_dropdown_exposes_only_the_next_payout_state(self):
         order = Order.objects.create(
             id="PB-104",
@@ -64,6 +87,15 @@ class PaymentLifecycleTests(TestCase):
             list(form.fields['status'].choices),
             [('ZEC_CONFIRMED', 'Zec Confirmed'), ('PAYOUT_PROCESSING', 'Payout Processing')],
         )
+
+    def test_admin_can_complete_directly_after_processing_payout(self):
+        order = Order.objects.create(
+            id='PB-107', currency='NGN', fiatAmount=5000, zecAmount=1.0, rate=5000, fee=0,
+            recipientCountry='NG', recipientBank='Test Bank', recipientAccountNumber='123456',
+            recipientAccountName='Jane Doe', paymentAddress='u1admincomplete', status='PAYOUT_PROCESSING',
+        )
+        form = OrderAdminForm(instance=order)
+        self.assertIn(('COMPLETED', 'Completed'), list(form.fields['status'].choices))
 
     def test_admin_status_change_updates_order_and_records_history(self):
         order = Order.objects.create(
@@ -96,7 +128,7 @@ class PaymentLifecycleTests(TestCase):
             'Status changed by admin from FIAT_SENT to COMPLETED.',
         )
 
-    def test_admin_can_advance_underpaid_order_after_review(self):
+    def test_admin_cannot_advance_underpaid_order_from_dropdown(self):
         order = Order.objects.create(
             id="PB-105",
             currency="NGN",
@@ -112,21 +144,55 @@ class PaymentLifecycleTests(TestCase):
             status="UNDERPAID",
         )
         form = OrderAdminForm(instance=order)
-        self.assertEqual(
-            list(form.fields['status'].choices),
-            [('UNDERPAID', 'Underpaid'), ('PAYOUT_PROCESSING', 'Payout Processing')],
-        )
+        self.assertEqual(list(form.fields['status'].choices), [('UNDERPAID', 'Underpaid')])
 
     def test_payment_tolerance_accepts_boundary_and_marks_amounts_outside_it(self):
-        self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('0.99'))['status'], 'ZEC_CONFIRMED')
-        self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('1.01'))['status'], 'ZEC_CONFIRMED')
-        self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('0.989'))['status'], 'UNDERPAID')
-        self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('1.011'))['status'], 'OVERPAID')
+        self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('0.9999999'))['status'], 'ZEC_CONFIRMED')
+        self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('1.0000001'))['status'], 'ZEC_CONFIRMED')
+        self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('0.99999989'))['status'], 'UNDERPAID')
+        self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('1.00000011'))['status'], 'OVERPAID')
 
     def test_small_absolute_overpayment_is_accepted_as_zec_slippage(self):
-        result = evaluate_payment_status(Decimal('0.015'), Decimal('0.015001'))
+        result = evaluate_payment_status(Decimal('0.015'), Decimal('0.0150001'))
         self.assertEqual(result['status'], 'ZEC_CONFIRMED')
-        self.assertEqual(result['difference'], Decimal('0.000001'))
+        self.assertEqual(result['difference'], Decimal('0.0000001'))
+
+    def test_overpayment_beyond_slippage_remains_an_exception(self):
+        result = evaluate_payment_status(Decimal('0.0001'), Decimal('0.00010011'))
+        self.assertEqual(result['status'], 'OVERPAID')
+
+    def test_overpayment_of_one_millionth_is_outside_the_requested_tolerance(self):
+        result = evaluate_payment_status(Decimal('1'), Decimal('1.000001'))
+        self.assertEqual(result['status'], 'OVERPAID')
+
+    @patch.dict('os.environ', {'ZPAY_API_BASE_URL': 'https://zpay.example', 'ZPAY_API_KEY': 'server-key'})
+    @patch('orders.views.requests.get')
+    def test_confirmed_zpay_request_advances_saved_order_to_payout(self, get):
+        response = Mock()
+        response.json.return_value = {
+            'id': '2f1c5de2-9da6-4afb-9155-a464d18a437b',
+            'amount_zatoshis': '100000000',
+            'received_zatoshis': '100000010',
+            'funding_status': 'overpaid',
+            'status': 'awaiting_payment',
+            'address': 'u1testpaymentaddress',
+        }
+        get.return_value = response
+        order = Order.objects.create(
+            id='2f1c5de2-9da6-4afb-9155-a464d18a437b', currency='NGN', fiatAmount=5000,
+            zecAmount=1, expectedAmount=Decimal('1'), rate=5000, fee=0,
+            recipientCountry='NG', recipientBank='Test Bank', recipientAccountNumber='123456',
+            recipientAccountName='Jane Doe', paymentAddress='u1testpaymentaddress', status='AWAITING_ZEC', source='zpay',
+        )
+        OrderHistory.objects.create(order=order, status='AWAITING_ZEC', note='Order created.')
+
+        result = APIClient().get(f'/api/private-bill/orders/{order.id}')
+
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.data['status'], 'PAYOUT_PROCESSING')
+        order.refresh_from_db()
+        self.assertEqual(order.statusHistory.count(), 3)
+        self.assertEqual(order.statusHistory.order_by('id').last().status, 'PAYOUT_PROCESSING')
 
     def test_payment_is_validated_against_expected_amount_and_persisted(self):
         order = Order.objects.create(
@@ -220,11 +286,11 @@ class PaymentLifecycleTests(TestCase):
         self.assertEqual(first["status"], "UNDERPAID")
         self.assertEqual(order.receivedAmount, Decimal("0.60"))
 
-        second = process_payment_receipt(order, "tx-partial-2", Decimal("0.395"), confirmations=2)
+        second = process_payment_receipt(order, "tx-partial-2", Decimal("0.39999995"), confirmations=2)
         self.assertEqual(second["status"], "ZEC_CONFIRMED")
         order.refresh_from_db()
-        self.assertEqual(order.receivedAmount, Decimal("0.995"))
-        self.assertEqual(order.transactionHash, "tx-partial-2")
+        self.assertEqual(order.receivedAmount, Decimal("0.99999995"))
+        self.assertEqual(order.transactionHash, "tx-partial-1")
         self.assertEqual(order.statusHistory.count(), 3)
 
     def test_detected_payment_stays_detected_until_confirmation_threshold(self):

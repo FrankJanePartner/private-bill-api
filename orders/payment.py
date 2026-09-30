@@ -7,16 +7,7 @@ from django.utils import timezone
 from .models import Order, OrderHistory
 
 
-DEFAULT_TOLERANCE_PERCENT = Decimal(os.environ.get("PAYMENT_TOLERANCE_PERCENT", "0.01"))
-DEFAULT_TOLERANCE_ZEC = Decimal(os.environ.get("PAYMENT_TOLERANCE_ZEC", "0.000001"))
-
-
-def get_payment_tolerance_percent():
-    raw = os.environ.get("PAYMENT_TOLERANCE_PERCENT", str(DEFAULT_TOLERANCE_PERCENT))
-    try:
-        return Decimal(str(raw))
-    except (InvalidOperation, TypeError, ValueError):
-        return DEFAULT_TOLERANCE_PERCENT
+DEFAULT_TOLERANCE_ZEC = Decimal(os.environ.get("PAYMENT_TOLERANCE_ZEC", "0.0000001"))
 
 
 def get_payment_tolerance_zec():
@@ -27,19 +18,26 @@ def get_payment_tolerance_zec():
         return DEFAULT_TOLERANCE_ZEC
 
 
-def evaluate_payment_status(expected_amount, actual_amount, tolerance_percent=None):
+def evaluate_payment_status(expected_amount, actual_amount):
     try:
         expected = Decimal(str(expected_amount))
         actual = Decimal(str(actual_amount))
     except (InvalidOperation, TypeError, ValueError):
         raise ValueError("Payment amounts must be valid decimal values.")
 
-    percent_tolerance = expected * (tolerance_percent if tolerance_percent is not None else get_payment_tolerance_percent())
-    tolerance = max(percent_tolerance, get_payment_tolerance_zec())
+    tolerance = get_payment_tolerance_zec()
     if actual < (expected - tolerance):
         return {
             "status": "UNDERPAID",
             "difference": expected - actual,
+            "expectedAmount": expected,
+            "receivedAmount": actual,
+            "tolerance": tolerance,
+        }
+    if actual > (expected + tolerance):
+        return {
+            "status": "OVERPAID",
+            "difference": actual - expected,
             "expectedAmount": expected,
             "receivedAmount": actual,
             "tolerance": tolerance,
@@ -84,7 +82,7 @@ def process_payment_receipt(order, transaction_hash, amount_received, confirmati
             "difference": Decimal("0"),
         }
 
-    if order.transactionHash == transaction_hash and order.status in ("PAYOUT_PROCESSING", "FIAT_SENT", "COMPLETED"):
+    if order.transactionHash == transaction_hash and order.status in ("ZEC_CONFIRMED", "PAYOUT_PROCESSING", "FIAT_SENT", "COMPLETED"):
         return {
             "processed": False,
             "status": order.status,

@@ -32,14 +32,14 @@ def _amount_to_zatoshis(zec_amount) -> str:
     return str(zatoshis)
 
 
-def generate_wallet(order_id: str, zec_amount) -> str:
+def generate_payment_request(order_id: str, zec_amount) -> dict:
     """Allocate a real mainnet Unified Address through the ZPay API.
 
     Required environment variables:
     - ZPAY_API_BASE_URL, for example https://api.zpay.example
     - ZPAY_API_KEY, a ZPay merchant API key (kept server-side only)
 
-    The order ID is used as the Idempotency-Key, so a retry cannot allocate a
+    The order reference is used as the Idempotency-Key, so a retry cannot allocate a
     different address for the same order.
     """
     api_base_url = os.environ.get("ZPAY_API_BASE_URL", "").rstrip("/")
@@ -63,12 +63,21 @@ def generate_wallet(order_id: str, zec_amount) -> str:
             timeout=20,
         )
         response.raise_for_status()
-        address = response.json().get("address")
+        payment_request = response.json()
     except (requests.RequestException, ValueError, TypeError) as exc:
         raise WalletUnavailable("ZPay address allocation failed") from exc
 
     # A ZPay receiving address for this integration must be a mainnet Unified
     # Address. Transparent addresses begin with t1/t3 and are never accepted.
+    address = payment_request.get("address")
+    request_id = payment_request.get("id")
     if not isinstance(address, str) or not address.startswith("u1"):
         raise WalletUnavailable("ZPay did not return a shielded Unified Address")
-    return address
+    if not isinstance(request_id, str) or not request_id:
+        raise WalletUnavailable("ZPay did not return a payment request ID")
+    return payment_request
+
+
+def generate_wallet(order_id: str, zec_amount) -> str:
+    """Compatibility helper returning only the allocated Unified Address."""
+    return generate_payment_request(order_id, zec_amount)["address"]

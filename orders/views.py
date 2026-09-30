@@ -1,4 +1,6 @@
+import os
 import uuid
+from urllib.parse import quote as url_quote
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
@@ -11,7 +13,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from .models import Order, OrderHistory
-from .payment import process_payment_receipt
+from .payment import evaluate_payment_status, process_payment_receipt
 from .serializers import (
     CreateOrderRequestSerializer,
     OrderSerializer,
@@ -19,7 +21,7 @@ from .serializers import (
     QuoteRequestSerializer,
     QuoteSerializer,
 )
-from .wallet import WalletUnavailable, generate_wallet
+from .wallet import WalletUnavailable, generate_payment_request
 
 @extend_schema(
     request=QuoteRequestSerializer,
@@ -71,9 +73,9 @@ def create_order(request):
     quote_data = request.data.get('quote', {})
     recipient_data = request.data.get('recipient', {})
     
-    order_id = f"PB-{str(uuid.uuid4()).split('-')[0].upper()}-{str(timezone.now().timestamp()).split('.')[0][-4:]}"
+    reference = f"PB-{str(uuid.uuid4()).split('-')[0].upper()}-{str(timezone.now().timestamp()).split('.')[0][-4:]}"
     try:
-        paymentAddress = generate_wallet(order_id, quote_data.get('zecAmount'))
+        payment_request = generate_payment_request(reference, quote_data.get('zecAmount'))
     except WalletUnavailable:
         # Never create an order with a fake or transparent fallback address.
         return Response(
@@ -84,7 +86,7 @@ def create_order(request):
     try:
         with transaction.atomic():
             order = Order.objects.create(
-                id=order_id,
+                id=payment_request['id'],
                 currency=quote_data.get('currency'),
                 fiatAmount=quote_data.get('fiatAmount'),
                 zecAmount=quote_data.get('zecAmount'),
@@ -96,8 +98,9 @@ def create_order(request):
                 recipientBank=recipient_data.get('bank'),
                 recipientAccountNumber=recipient_data.get('accountNumber'),
                 recipientAccountName=recipient_data.get('accountName'),
-                paymentAddress=paymentAddress,
-                status='AWAITING_ZEC'
+                paymentAddress=payment_request['address'],
+                status='AWAITING_ZEC',
+                source='zpay'
             )
 
             OrderHistory.objects.create(
@@ -110,9 +113,66 @@ def create_order(request):
             {'error': 'Order storage is unavailable. Configure the backend database before creating orders.'},
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
+    except (KeyError, TypeError, ValueError):
+        return Response({'error': 'ZPay returned an incomplete payment request.'}, status=status.HTTP_502_BAD_GATEWAY)
     
     serializer = OrderSerializer(order)
     return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+def refresh_zpay_order(order):
+    if order.source != 'zpay' or order.status not in ('AWAITING_ZEC', 'ZEC_DETECTED', 'CONFIRMING', 'UNDERPAID'):
+        return order
+    api_base = os.environ.get('ZPAY_API_BASE_URL', '').rstrip('/')
+    api_key = os.environ.get('ZPAY_API_KEY', '')
+    if not api_base or not api_key:
+        return order
+    try:
+        upstream = requests.get(
+            f"{api_base}/api/v1/payment-requests/{url_quote(order.id, safe='')}/",
+            headers={'Authorization': f'Bearer {api_key}', 'Accept': 'application/json'},
+            timeout=15,
+        )
+        upstream.raise_for_status()
+        payment_request = upstream.json()
+        if payment_request.get('address') != order.paymentAddress:
+            return order
+        expected = order.expectedAmount or Decimal(str(order.zecAmount))
+        received = Decimal(str(payment_request.get('received_zatoshis', '0'))) / Decimal('100000000')
+    except (requests.RequestException, ValueError, TypeError, InvalidOperation):
+        return order
+
+    evaluation = evaluate_payment_status(expected, received)
+    funding_status = str(payment_request.get('funding_status', '')).lower()
+    paid = funding_status in ('paid', 'fully_paid', 'overpaid') or str(payment_request.get('status', '')).lower() == 'completed'
+    now = timezone.now()
+    previous_status = order.status
+    previous_received = order.receivedAmount
+    order.receivedAmount = received
+    order.updatedAt = now
+    if evaluation['status'] == 'OVERPAID':
+        order.status = 'OVERPAID'
+    elif evaluation['status'] == 'UNDERPAID':
+        order.status = 'UNDERPAID' if paid else ('ZEC_DETECTED' if received > 0 else 'AWAITING_ZEC')
+    elif paid:
+        order.status = 'PAYOUT_PROCESSING'
+        order.confirmations = max(1, order.confirmations)
+        order.paymentDetectedAt = order.paymentDetectedAt or now
+        order.paymentConfirmedAt = order.paymentConfirmedAt or now
+    else:
+        order.status = 'ZEC_DETECTED' if received > 0 else 'AWAITING_ZEC'
+
+    if previous_status != order.status:
+        order.save()
+        if order.status == 'PAYOUT_PROCESSING':
+            OrderHistory.objects.create(order=order, status='ZEC_CONFIRMED', at=now, note=f'ZPay confirmed {received} ZEC within allowed slippage.')
+        OrderHistory.objects.create(order=order, status=order.status, at=now, note=(
+            'Payout processing started after ZEC confirmation.' if order.status == 'PAYOUT_PROCESSING'
+            else f'ZPay payment status updated: {order.status.replace("_", " ").lower()}.'
+        ))
+    elif previous_received != received:
+        order.save(update_fields=['receivedAmount', 'updatedAt'])
+    return order
 
 @extend_schema(responses={200: OrderSerializer})
 @api_view(['GET'])
@@ -122,6 +182,7 @@ def get_order(request, orderId):
     except Order.DoesNotExist:
         return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
         
+    order = refresh_zpay_order(order)
     serializer = OrderSerializer(order)
     return Response(serializer.data)
 
