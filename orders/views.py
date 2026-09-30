@@ -154,7 +154,11 @@ def refresh_zpay_order(order):
         order.status = 'OVERPAID'
     elif evaluation['status'] == 'UNDERPAID':
         order.status = 'UNDERPAID' if paid else ('ZEC_DETECTED' if received > 0 else 'AWAITING_ZEC')
-    elif paid:
+    elif evaluation['status'] == 'ZEC_CONFIRMED':
+        # The configured absolute tolerance is authoritative. ZPay may still
+        # label a payment partially_paid/underpaid while the amount is within
+        # our accepted slippage, so requiring its exact funding label here
+        # would leave a valid payment at ZEC_DETECTED indefinitely.
         order.status = 'PAYOUT_PROCESSING'
         order.confirmations = max(1, order.confirmations)
         order.paymentDetectedAt = order.paymentDetectedAt or now

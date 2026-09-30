@@ -167,13 +167,13 @@ class PaymentLifecycleTests(TestCase):
 
     @patch.dict('os.environ', {'ZPAY_API_BASE_URL': 'https://zpay.example', 'ZPAY_API_KEY': 'server-key'})
     @patch('orders.views.requests.get')
-    def test_confirmed_zpay_request_advances_saved_order_to_payout(self, get):
+    def test_in_tolerance_zpay_request_advances_even_if_provider_label_is_not_paid(self, get):
         response = Mock()
         response.json.return_value = {
             'id': '2f1c5de2-9da6-4afb-9155-a464d18a437b',
             'amount_zatoshis': '100000000',
             'received_zatoshis': '100000010',
-            'funding_status': 'overpaid',
+            'funding_status': 'partially_paid',
             'status': 'awaiting_payment',
             'address': 'u1testpaymentaddress',
         }
