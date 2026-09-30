@@ -121,7 +121,7 @@ def create_order(request):
 
 
 def refresh_zpay_order(order):
-    if order.source != 'zpay' or order.status not in ('AWAITING_ZEC', 'ZEC_DETECTED', 'CONFIRMING', 'UNDERPAID'):
+    if order.source != 'zpay' or order.status not in ('AWAITING_ZEC', 'ZEC_DETECTED', 'CONFIRMING', 'UNDERPAID', 'OVERPAID'):
         return order
     api_base = os.environ.get('ZPAY_API_BASE_URL', '').rstrip('/')
     api_key = os.environ.get('ZPAY_API_KEY', '')

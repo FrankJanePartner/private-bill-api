@@ -7,7 +7,7 @@ from django.utils import timezone
 from .models import Order, OrderHistory
 
 
-DEFAULT_TOLERANCE_ZEC = Decimal(os.environ.get("PAYMENT_TOLERANCE_ZEC", "0.0000001"))
+DEFAULT_TOLERANCE_ZEC = Decimal(os.environ.get("PAYMENT_TOLERANCE_ZEC", "0.000001"))
 
 
 def get_payment_tolerance_zec():
