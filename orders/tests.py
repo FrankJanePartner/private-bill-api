@@ -96,7 +96,7 @@ class PaymentLifecycleTests(TestCase):
             'Status changed by admin from FIAT_SENT to COMPLETED.',
         )
 
-    def test_admin_cannot_advance_underpaid_order_from_dropdown(self):
+    def test_admin_can_advance_underpaid_order_after_review(self):
         order = Order.objects.create(
             id="PB-105",
             currency="NGN",
@@ -122,6 +122,11 @@ class PaymentLifecycleTests(TestCase):
         self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('1.01'))['status'], 'ZEC_CONFIRMED')
         self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('0.989'))['status'], 'UNDERPAID')
         self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('1.011'))['status'], 'OVERPAID')
+
+    def test_small_absolute_overpayment_is_accepted_as_zec_slippage(self):
+        result = evaluate_payment_status(Decimal('0.015'), Decimal('0.015001'))
+        self.assertEqual(result['status'], 'ZEC_CONFIRMED')
+        self.assertEqual(result['difference'], Decimal('0.000001'))
 
     def test_payment_is_validated_against_expected_amount_and_persisted(self):
         order = Order.objects.create(

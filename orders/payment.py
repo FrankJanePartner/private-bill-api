@@ -8,6 +8,7 @@ from .models import Order, OrderHistory
 
 
 DEFAULT_TOLERANCE_PERCENT = Decimal(os.environ.get("PAYMENT_TOLERANCE_PERCENT", "0.01"))
+DEFAULT_TOLERANCE_ZEC = Decimal(os.environ.get("PAYMENT_TOLERANCE_ZEC", "0.000001"))
 
 
 def get_payment_tolerance_percent():
@@ -18,6 +19,14 @@ def get_payment_tolerance_percent():
         return DEFAULT_TOLERANCE_PERCENT
 
 
+def get_payment_tolerance_zec():
+    raw = os.environ.get("PAYMENT_TOLERANCE_ZEC", str(DEFAULT_TOLERANCE_ZEC))
+    try:
+        return Decimal(str(raw))
+    except (InvalidOperation, TypeError, ValueError):
+        return DEFAULT_TOLERANCE_ZEC
+
+
 def evaluate_payment_status(expected_amount, actual_amount, tolerance_percent=None):
     try:
         expected = Decimal(str(expected_amount))
@@ -25,19 +34,12 @@ def evaluate_payment_status(expected_amount, actual_amount, tolerance_percent=No
     except (InvalidOperation, TypeError, ValueError):
         raise ValueError("Payment amounts must be valid decimal values.")
 
-    tolerance = (expected * (tolerance_percent if tolerance_percent is not None else get_payment_tolerance_percent()))
+    percent_tolerance = expected * (tolerance_percent if tolerance_percent is not None else get_payment_tolerance_percent())
+    tolerance = max(percent_tolerance, get_payment_tolerance_zec())
     if actual < (expected - tolerance):
         return {
             "status": "UNDERPAID",
             "difference": expected - actual,
-            "expectedAmount": expected,
-            "receivedAmount": actual,
-            "tolerance": tolerance,
-        }
-    if actual > (expected + tolerance):
-        return {
-            "status": "OVERPAID",
-            "difference": actual - expected,
             "expectedAmount": expected,
             "receivedAmount": actual,
             "tolerance": tolerance,
@@ -82,7 +84,7 @@ def process_payment_receipt(order, transaction_hash, amount_received, confirmati
             "difference": Decimal("0"),
         }
 
-    if order.transactionHash == transaction_hash and order.status in ("ZEC_CONFIRMED", "PAYOUT_PROCESSING", "FIAT_SENT", "COMPLETED"):
+    if order.transactionHash == transaction_hash and order.status in ("PAYOUT_PROCESSING", "FIAT_SENT", "COMPLETED"):
         return {
             "processed": False,
             "status": order.status,
@@ -118,9 +120,6 @@ def process_payment_receipt(order, transaction_hash, amount_received, confirmati
     if payment_address:
         order.paymentAddress = payment_address
 
-    # A receipt observed in the mempool must remain detected/confirming until it
-    # reaches the configured confirmation threshold. Keep under/overpayment
-    # exceptions visible for operators, but advance confirmed funds normally.
     confirmed = int(confirmations) >= int(os.environ.get("ZEC_CONFIRMATION_THRESHOLD", "1"))
 
     if evaluation["status"] == "ZEC_CONFIRMED" and confirmed:
@@ -131,7 +130,7 @@ def process_payment_receipt(order, transaction_hash, amount_received, confirmati
             f"{evaluation['expectedAmount']} ZEC expected."
         )
     elif evaluation["status"] == "ZEC_CONFIRMED":
-        order.status = "CONFIRMING" if int(confirmations) > 0 else "ZEC_DETECTED"
+        order.status = "ZEC_DETECTED" if int(confirmations) == 0 else "CONFIRMING"
         order.paymentConfirmedAt = None
         note = (
             f"Payment detected: {evaluation['receivedAmount']} ZEC received against "
