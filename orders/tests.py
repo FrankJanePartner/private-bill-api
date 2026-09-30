@@ -7,7 +7,7 @@ from django.contrib.auth import get_user_model
 from django.test import RequestFactory, SimpleTestCase, TestCase
 from rest_framework.test import APIClient
 
-from .admin import OrderAdmin, OrderAdminForm
+from .admin import OrderAdmin, OrderAdminForm, OrderHistoryAdmin
 from .models import Order, OrderHistory
 from .wallet import WalletUnavailable, generate_wallet
 from .payment import evaluate_payment_status, process_payment_receipt
@@ -97,6 +97,22 @@ class PaymentLifecycleTests(TestCase):
         form = OrderAdminForm(instance=order)
         self.assertIn(('COMPLETED', 'Completed'), list(form.fields['status'].choices))
 
+    def test_order_history_is_read_only_and_cannot_change_order_status(self):
+        order = Order.objects.create(
+            id='PB-HISTORY-LOCK', currency='NGN', fiatAmount=100, zecAmount=1,
+            rate=100, fee=0, recipientCountry='NG', recipientBank='Test Bank',
+            recipientAccountNumber='123456', recipientAccountName='Jane Doe',
+            paymentAddress='u1historylock', status='PAYOUT_PROCESSING',
+        )
+        history = OrderHistory.objects.create(order=order, status='PAYOUT_PROCESSING', note='Payout processing started.')
+        history_admin = OrderHistoryAdmin(OrderHistory, AdminSite())
+        request = RequestFactory().get('/admin/orders/orderhistory/')
+
+        self.assertEqual(history_admin.get_readonly_fields(request, history), ('order', 'status', 'at', 'note'))
+        self.assertFalse(history_admin.has_add_permission(request))
+        self.assertFalse(history_admin.has_change_permission(request, history))
+        self.assertFalse(history_admin.has_delete_permission(request, history))
+
     def test_admin_status_change_updates_order_and_records_history(self):
         order = Order.objects.create(
             id="PB-106",
@@ -165,6 +181,16 @@ class PaymentLifecycleTests(TestCase):
         result = evaluate_payment_status(Decimal('1'), Decimal('1.000001'))
         self.assertEqual(result['status'], 'ZEC_CONFIRMED')
 
+    def test_amounts_in_latest_zpay_screenshot_are_within_requested_tolerance(self):
+        self.assertEqual(
+            evaluate_payment_status(Decimal('0.00009286'), Decimal('0.00009300'))['status'],
+            'ZEC_CONFIRMED',
+        )
+        self.assertEqual(
+            evaluate_payment_status(Decimal('0.00014560'), Decimal('0.00014600'))['status'],
+            'ZEC_CONFIRMED',
+        )
+
     @patch.dict('os.environ', {'ZPAY_API_BASE_URL': 'https://zpay.example', 'ZPAY_API_KEY': 'server-key'})
     @patch('orders.views.requests.get')
     def test_in_tolerance_zpay_request_advances_even_if_provider_label_is_not_paid(self, get):
@@ -200,8 +226,8 @@ class PaymentLifecycleTests(TestCase):
         response = Mock()
         response.json.return_value = {
             'id': '2f1c5de2-9da6-4afb-9155-a464d18a437b',
-            'amount_zatoshis': '100000000',
-            'received_zatoshis': '100000100',
+            'amount_zatoshis': '9286',
+            'received_zatoshis': '9300',
             'funding_status': 'partially_paid',
             'status': 'awaiting_payment',
             'address': 'u1testpaymentaddress',
@@ -209,7 +235,8 @@ class PaymentLifecycleTests(TestCase):
         get.return_value = response
         order = Order.objects.create(
             id='2f1c5de2-9da6-4afb-9155-a464d18a437b', currency='NGN', fiatAmount=5000,
-            zecAmount=1, expectedAmount=Decimal('1'), receivedAmount=Decimal('1.0000011'),
+            zecAmount=0.00009286, expectedAmount=Decimal('0.00009286'),
+            receivedAmount=Decimal('0.00009300'),
             rate=5000, fee=0, recipientCountry='NG', recipientBank='Test Bank',
             recipientAccountNumber='123456', recipientAccountName='Jane Doe',
             paymentAddress='u1testpaymentaddress', status='OVERPAID', source='zpay',

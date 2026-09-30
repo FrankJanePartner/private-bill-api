@@ -22,7 +22,7 @@ ADMIN_STATUS_TRANSITIONS = {
 class OrderAdminForm(forms.ModelForm):
     status = forms.ChoiceField(
         choices=(),
-        help_text='Advance only after verifying the current payout step. Payment detection and exception statuses are system-controlled.',
+        help_text='On this Orders record, select Completed after confirming the payout was sent. The customer tracker reflects the saved status within about five seconds. Order history entries are read-only audit records.',
     )
 
     class Meta:
@@ -89,3 +89,13 @@ class OrderHistoryAdmin(admin.ModelAdmin):
     list_display = ('order', 'status', 'at', 'note')
     list_filter = ('status',)
     search_fields = ('order__id', 'note')
+    readonly_fields = ('order', 'status', 'at', 'note')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
