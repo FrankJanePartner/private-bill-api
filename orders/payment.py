@@ -1,6 +1,5 @@
 import os
 from decimal import Decimal, InvalidOperation
-from datetime import datetime
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -8,7 +7,7 @@ from django.utils import timezone
 from .models import Order, OrderHistory
 
 
-DEFAULT_TOLERANCE_PERCENT = Decimal(os.environ.get("PAYMENT_TOLERANCE_PERCENT", "0.005"))
+DEFAULT_TOLERANCE_PERCENT = Decimal(os.environ.get("PAYMENT_TOLERANCE_PERCENT", "0.01"))
 
 
 def get_payment_tolerance_percent():
@@ -71,18 +70,6 @@ def process_payment_receipt(order, transaction_hash, amount_received, confirmati
             note='Order created; waiting for ZEC payment.',
         )
 
-    if order.transactionHash and order.transactionHash == transaction_hash:
-        return {
-            "processed": False,
-            "status": order.status,
-            "message": "This blockchain transaction has already been processed for this order.",
-            "expectedAmount": order.expectedAmount or order.zecAmount,
-            "receivedAmount": order.receivedAmount or Decimal("0"),
-            "transactionHash": order.transactionHash,
-            "confirmations": order.confirmations,
-            "difference": Decimal("0"),
-        }
-
     if Order.objects.filter(transactionHash=transaction_hash).exclude(id=order.id).exists():
         return {
             "processed": False,
@@ -95,11 +82,32 @@ def process_payment_receipt(order, transaction_hash, amount_received, confirmati
             "difference": Decimal("0"),
         }
 
+    if order.transactionHash == transaction_hash and order.status in ("ZEC_CONFIRMED", "PAYOUT_PROCESSING", "FIAT_SENT", "COMPLETED"):
+        return {
+            "processed": False,
+            "status": order.status,
+            "message": "This blockchain transaction has already been processed for this order.",
+            "expectedAmount": order.expectedAmount or order.zecAmount,
+            "receivedAmount": order.receivedAmount or Decimal("0"),
+            "transactionHash": order.transactionHash,
+            "confirmations": order.confirmations,
+            "difference": Decimal("0"),
+        }
+
     expected_amount = Decimal(str(order.expectedAmount or order.zecAmount))
-    evaluation = evaluate_payment_status(expected_amount, amount_received)
+    incoming_amount = Decimal(str(amount_received))
+    is_new_receipt = transaction_hash != order.transactionHash
+    total_received = (Decimal(str(order.receivedAmount or 0)) + incoming_amount) if is_new_receipt else incoming_amount
+    if not is_new_receipt:
+        # Recheck confirmations without adding the same receipt twice.
+        total_received = Decimal(str(order.receivedAmount or 0))
+    evaluation = evaluate_payment_status(expected_amount, total_received)
     now = timezone.now()
 
-    order.transactionHash = transaction_hash
+    # Retain the first receipt hash on the order while allowing additional
+    # payment receipts to be accumulated against its unique deposit address.
+    if not order.transactionHash:
+        order.transactionHash = transaction_hash
     order.blockNumber = block_number
     order.confirmations = int(confirmations)
     order.paymentDetectedAt = order.paymentDetectedAt or now
@@ -110,17 +118,28 @@ def process_payment_receipt(order, transaction_hash, amount_received, confirmati
     if payment_address:
         order.paymentAddress = payment_address
 
-    if evaluation["status"] == "ZEC_CONFIRMED":
+    # A receipt observed in the mempool must remain detected/confirming until it
+    # reaches the configured confirmation threshold. Keep under/overpayment
+    # exceptions visible for operators, but advance confirmed funds normally.
+    confirmed = int(confirmations) >= int(os.environ.get("ZEC_CONFIRMATION_THRESHOLD", "1"))
+
+    if evaluation["status"] == "ZEC_CONFIRMED" and confirmed:
         order.status = "ZEC_CONFIRMED"
         order.paymentConfirmedAt = order.paymentConfirmedAt or now
-        order.completedAt = order.completedAt or (now if int(confirmations) >= 1 else None)
         note = (
             f"Payment confirmed: {evaluation['receivedAmount']} ZEC received against "
             f"{evaluation['expectedAmount']} ZEC expected."
         )
+    elif evaluation["status"] == "ZEC_CONFIRMED":
+        order.status = "CONFIRMING" if int(confirmations) > 0 else "ZEC_DETECTED"
+        order.paymentConfirmedAt = None
+        note = (
+            f"Payment detected: {evaluation['receivedAmount']} ZEC received against "
+            f"{evaluation['expectedAmount']} ZEC expected; awaiting confirmations."
+        )
     elif evaluation["status"] == "UNDERPAID":
-        order.status = "UNDERPAID"
-        order.paymentConfirmedAt = order.paymentConfirmedAt or None
+        order.status = "UNDERPAID" if confirmed else ("CONFIRMING" if int(confirmations) > 0 else "ZEC_DETECTED")
+        order.paymentConfirmedAt = None
         note = (
             f"Underpaid: {evaluation['receivedAmount']} ZEC received against "
             f"{evaluation['expectedAmount']} ZEC expected. Shortfall: {evaluation['difference']} ZEC."
@@ -148,7 +167,8 @@ def process_payment_receipt(order, transaction_hash, amount_received, confirmati
             "difference": Decimal("0"),
         }
 
-    _append_order_history(order, order.status, note)
+    history_note = note if is_new_receipt else f"Payment update: {note}"
+    _append_order_history(order, order.status, history_note)
 
     return {
         "processed": True,

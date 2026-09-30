@@ -54,6 +54,9 @@ class CreateOrderRequestSerializer(serializers.Serializer):
 
 class PaymentStatusSerializer(serializers.Serializer):
     status = serializers.CharField()
+    processed = serializers.BooleanField(required=False)
+    message = serializers.CharField(required=False)
+    difference = serializers.DecimalField(max_digits=18, decimal_places=8, required=False)
     expectedAmount = serializers.DecimalField(max_digits=18, decimal_places=8, min_value=0, required=False, allow_null=True)
     receivedAmount = serializers.DecimalField(max_digits=18, decimal_places=8, min_value=0, required=False, allow_null=True)
     confirmations = serializers.IntegerField(required=False, allow_null=True)

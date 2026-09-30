@@ -112,13 +112,16 @@ class PaymentLifecycleTests(TestCase):
             status="UNDERPAID",
         )
         form = OrderAdminForm(instance=order)
-        self.assertEqual(list(form.fields['status'].choices), [('UNDERPAID', 'Underpaid')])
+        self.assertEqual(
+            list(form.fields['status'].choices),
+            [('UNDERPAID', 'Underpaid'), ('PAYOUT_PROCESSING', 'Payout Processing')],
+        )
 
     def test_payment_tolerance_accepts_boundary_and_marks_amounts_outside_it(self):
-        self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('0.995'))['status'], 'ZEC_CONFIRMED')
-        self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('1.005'))['status'], 'ZEC_CONFIRMED')
-        self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('0.994'))['status'], 'UNDERPAID')
-        self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('1.006'))['status'], 'OVERPAID')
+        self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('0.99'))['status'], 'ZEC_CONFIRMED')
+        self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('1.01'))['status'], 'ZEC_CONFIRMED')
+        self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('0.989'))['status'], 'UNDERPAID')
+        self.assertEqual(evaluate_payment_status(Decimal('1'), Decimal('1.011'))['status'], 'OVERPAID')
 
     def test_payment_is_validated_against_expected_amount_and_persisted(self):
         order = Order.objects.create(
@@ -190,6 +193,54 @@ class PaymentLifecycleTests(TestCase):
         overpaid = process_payment_receipt(second_order, "tx-over", Decimal("1.25"), confirmations=1)
         self.assertEqual(overpaid["status"], "OVERPAID")
         self.assertEqual(second_order.status, "OVERPAID")
+
+    def test_partial_receipts_accumulate_and_advance_after_confirmations(self):
+        order = Order.objects.create(
+            id="PB-PARTIAL",
+            currency="NGN",
+            fiatAmount=5000,
+            zecAmount=1.0,
+            expectedAmount=Decimal("1.0"),
+            rate=5000,
+            fee=0,
+            recipientCountry="NG",
+            recipientBank="Test Bank",
+            recipientAccountNumber="123456",
+            recipientAccountName="Jane Doe",
+            paymentAddress="u1partialaddress",
+            status="AWAITING_ZEC",
+        )
+
+        first = process_payment_receipt(order, "tx-partial-1", Decimal("0.60"), confirmations=2)
+        self.assertEqual(first["status"], "UNDERPAID")
+        self.assertEqual(order.receivedAmount, Decimal("0.60"))
+
+        second = process_payment_receipt(order, "tx-partial-2", Decimal("0.395"), confirmations=2)
+        self.assertEqual(second["status"], "ZEC_CONFIRMED")
+        order.refresh_from_db()
+        self.assertEqual(order.receivedAmount, Decimal("0.995"))
+        self.assertEqual(order.transactionHash, "tx-partial-2")
+        self.assertEqual(order.statusHistory.count(), 3)
+
+    def test_detected_payment_stays_detected_until_confirmation_threshold(self):
+        order = Order.objects.create(
+            id="PB-CONFIRMING",
+            currency="NGN",
+            fiatAmount=5000,
+            zecAmount=1.0,
+            rate=5000,
+            fee=0,
+            recipientCountry="NG",
+            recipientBank="Test Bank",
+            recipientAccountNumber="123456",
+            recipientAccountName="Jane Doe",
+            paymentAddress="u1confirmingaddress",
+            status="AWAITING_ZEC",
+        )
+
+        result = process_payment_receipt(order, "tx-confirming", Decimal("1.0"), confirmations=0)
+        self.assertEqual(result["status"], "ZEC_DETECTED")
+        self.assertIsNone(order.paymentConfirmedAt)
 
     def test_duplicate_transaction_hash_is_rejected_and_not_processed_twice(self):
         order = Order.objects.create(
